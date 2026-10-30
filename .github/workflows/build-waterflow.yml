@@ -1,0 +1,50 @@
+name: build-waterflow
+
+on:
+  push:
+    paths:
+      - 'waterflow-mod.zip'
+      - '.github/workflows/build-waterflow.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Unzip project
+        run: |
+          mkdir -p work
+          unzip -q waterflow-mod.zip -d work
+          ls work/waterflow-mod
+
+      - name: Setup NDK + CMake
+        uses: android-actions/setup-android@v3
+        with:
+          packages: ndk;27.2.12479018 cmake;3.31.6
+
+      - name: Configure
+        run: |
+          cmake -S work/waterflow-mod -B build/android -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE=$ANDROID_HOME/ndk/27.2.12479018/build/cmake/android.toolchain.cmake \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-24 \
+            -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build/android --target waterflow
+
+      - name: Package .levipack
+        run: |
+          mkdir -p dist/waterflow/config
+          cp work/waterflow-mod/manifest.json dist/waterflow/
+          cp work/waterflow-mod/config/sites.txt dist/waterflow/config/
+          cp build/android/libwaterflow.so dist/waterflow/
+          (cd dist/waterflow && zip -r ../../waterflow.levipack .)
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: waterflow-levipack
+          path: waterflow.levipack
