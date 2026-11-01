@@ -1,0 +1,35 @@
+name: build-herocine-native
+
+on:
+  push:
+    paths:
+      - 'HeroCineNative/**'
+      - '.github/workflows/build-herocine-native.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Android SDK and NDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: ndk;27.2.12479018 cmake;3.31.6
+
+      - name: Build and package HeroCine
+        run: |
+          ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.2.12479018" \
+          ANDROID_PLATFORM=android-24 \
+            sh HeroCineNative/build.sh
+
+      - name: Upload .levipack
+        uses: actions/upload-artifact@v4
+        with:
+          name: herocine-native-levipack
+          path: HeroCineNative/dist/herocine_native.levipack
+          if-no-files-found: error

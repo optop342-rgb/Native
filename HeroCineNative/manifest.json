@@ -1,0 +1,11 @@
+{
+  "type": "preload-native",
+  "name": "HeroCine Native",
+  "author": "Native",
+  "description": "A native cinematic path editor prototype for LeviLauncher.",
+  "version": "0.1.0",
+  "entry": "libherocine_native.so",
+  "minecraft_versions": [],
+  "overwrite_files": [],
+  "overwrite_folders": []
+}
