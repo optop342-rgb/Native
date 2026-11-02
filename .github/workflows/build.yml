@@ -44,8 +44,13 @@ jobs:
     - name: Patch CMakeLists for fmt and SDK
       run: |
         cd ${{ env.CMAKE_DIR }}
-        # CMakeLists.txt ke shuru mein fmt aur SDK add karo
+        
+        # 1. File ke shuru mein FetchContent aur SDK include add karo
         sed -i '1i include(FetchContent)\nFetchContent_Declare(fmt URL https://github.com/fmtlib/fmt/archive/refs/tags/10.2.1.zip)\nFetchContent_MakeAvailable(fmt)\ninclude_directories(${CMAKE_CURRENT_SOURCE_DIR}/../../preloader_sdk/include)' CMakeLists.txt
+        
+        # 2. ResistanceLab target ke saath fmt ko link karo
+        # (Maan kar chal rahe hain ki target ka naam resistance_lab hai jo error se pata chala)
+        sed -i 's/target_link_libraries(resistance_lab/target_link_libraries(resistance_lab fmt /g' CMakeLists.txt
 
     - name: Build with CMake
       run: |
