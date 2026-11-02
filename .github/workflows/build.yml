@@ -13,11 +13,6 @@ jobs:
     - name: Checkout Repository
       uses: actions/checkout@v4
 
-    - name: Install Dependencies (fmt)
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y libfmt-dev
-
     - name: Download and Setup Preloader SDK
       run: |
         git clone https://github.com/LiteLDev/preloader-android.git preloader_sdk
@@ -46,17 +41,19 @@ jobs:
         cmdline-tools-version: 11076708
         packages: 'ndk;26.1.10909125 cmake;3.22.1'
 
+    - name: Patch CMakeLists for fmt and SDK
+      run: |
+        cd ${{ env.CMAKE_DIR }}
+        # CMakeLists.txt ke shuru mein fmt aur SDK add karo
+        sed -i '1i include(FetchContent)\nFetchContent_Declare(fmt URL https://github.com/fmtlib/fmt/archive/refs/tags/10.2.1.zip)\nFetchContent_MakeAvailable(fmt)\ninclude_directories(${CMAKE_CURRENT_SOURCE_DIR}/../../preloader_sdk/include)' CMakeLists.txt
+
     - name: Build with CMake
       run: |
         cd ${{ env.CMAKE_DIR }}
-        
-        # fmt library ka path bhi include kar diya
         cmake -S . -B build \
           -DCMAKE_TOOLCHAIN_FILE=$ANDROID_HOME/ndk/26.1.10909125/build/cmake/android.toolchain.cmake \
           -DANDROID_ABI=arm64-v8a \
-          -DANDROID_PLATFORM=android-24 \
-          -DCMAKE_CXX_FLAGS="-I$(pwd)/../../preloader_sdk/include -I/usr/include"
-          
+          -DANDROID_PLATFORM=android-24
         cmake --build build -j$(nproc)
 
     - name: Upload Build Artifact
