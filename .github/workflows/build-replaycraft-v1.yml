@@ -1,0 +1,41 @@
+name: build-replaycraft-v1
+
+on:
+  push:
+    paths:
+      - 'ReplayCraft_V1_Native_BBS_HeroCine.zip'
+      - '.github/workflows/build-replaycraft-v1.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Android SDK and NDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: ndk;27.2.12479018 cmake;3.31.6
+
+      - name: Extract project
+        run: |
+          mkdir -p work
+          unzip -q ReplayCraft_V1_Native_BBS_HeroCine.zip -d work
+
+      - name: Build and package ReplayCraft
+        working-directory: work/ReplayCraft_V1_Native_BBS_HeroCine
+        run: |
+          ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.2.12479018" \
+          ANDROID_PLATFORM=android-26 \
+            sh scripts/build.sh
+
+      - name: Upload .levipack
+        uses: actions/upload-artifact@v4
+        with:
+          name: replaycraft-v1-levipack
+          path: work/ReplayCraft_V1_Native_BBS_HeroCine/dist/ReplayCraft_V1.levipack
+          if-no-files-found: error
