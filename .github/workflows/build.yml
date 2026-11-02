@@ -13,9 +13,13 @@ jobs:
     - name: Checkout Repository
       uses: actions/checkout@v4
 
+    - name: Install Dependencies (fmt)
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libfmt-dev
+
     - name: Download and Setup Preloader SDK
       run: |
-        # SDK ko download karo (kyunki teri zip mein nahi hai)
         git clone https://github.com/LiteLDev/preloader-android.git preloader_sdk
         
     - name: Unzip and Find CMakeLists
@@ -46,12 +50,12 @@ jobs:
       run: |
         cd ${{ env.CMAKE_DIR }}
         
-        # SDK ka path CMake ko do
+        # fmt library ka path bhi include kar diya
         cmake -S . -B build \
           -DCMAKE_TOOLCHAIN_FILE=$ANDROID_HOME/ndk/26.1.10909125/build/cmake/android.toolchain.cmake \
           -DANDROID_ABI=arm64-v8a \
           -DANDROID_PLATFORM=android-24 \
-          -DCMAKE_CXX_FLAGS="-I$(pwd)/../../preloader_sdk/include"
+          -DCMAKE_CXX_FLAGS="-I$(pwd)/../../preloader_sdk/include -I/usr/include"
           
         cmake --build build -j$(nproc)
 
