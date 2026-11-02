@@ -1,0 +1,49 @@
+name: Build Native Mod
+
+on:
+  push:
+    branches: [ "main" ] # Ya jo bhi tera branch hai
+  workflow_dispatch: # Taki tu manually bhi run kar sake
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+
+    - name: Unzip ResistanceLab
+      run: |
+        if [ -f "ResistanceLab.zip" ]; then
+          unzip -q ResistanceLab.zip -d ResistanceLab_Build
+        else
+          echo "Error: ResistanceLab.zip not found!"
+          exit 1
+        fi
+
+    - name: Setup Java
+      uses: actions/setup-java@v4
+      with:
+        distribution: 'temurin'
+        java-version: '21'
+
+    - name: Setup Android NDK
+      run: |
+        echo "y" | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --install "ndk;26.1.10909125" "cmake;3.22.1"
+        echo "ndk.dir=$ANDROID_HOME/ndk/26.1.10909125" > ResistanceLab_Build/local.properties
+
+    - name: Build with CMake
+      run: |
+        cd ResistanceLab_Build
+        mkdir -p build
+        cd build
+        cmake .. -DCMAKE_TOOLCHAIN_FILE=$ANDROID_HOME/ndk/26.1.10909125/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-24
+        make -j$(nproc)
+
+    - name: Upload Build Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ResistanceLab-Build
+        path: ResistanceLab_Build/build/*.so
+        if-no-files-found: error
