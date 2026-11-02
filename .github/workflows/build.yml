@@ -13,6 +13,11 @@ jobs:
     - name: Checkout Repository
       uses: actions/checkout@v4
 
+    - name: Download and Setup Preloader SDK
+      run: |
+        # SDK ko download karo (kyunki teri zip mein nahi hai)
+        git clone https://github.com/LiteLDev/preloader-android.git preloader_sdk
+        
     - name: Unzip and Find CMakeLists
       run: |
         if [ -f "ResistanceLab.zip" ]; then
@@ -22,11 +27,6 @@ jobs:
           exit 1
         fi
         
-        # Find karo CMakeLists.txt kahan hai
-        echo "Searching for CMakeLists.txt..."
-        find ResistanceLab_Build -name "CMakeLists.txt"
-        
-        # Agar mil gaya, toh uske folder ka path nikaalo
         CMAKE_DIR=$(find ResistanceLab_Build -name "CMakeLists.txt" -exec dirname {} \; | head -n 1)
         echo "CMAKE_DIR=$CMAKE_DIR" >> $GITHUB_ENV
 
@@ -44,12 +44,15 @@ jobs:
 
     - name: Build with CMake
       run: |
-        echo "Building in directory: ${{ env.CMAKE_DIR }}"
         cd ${{ env.CMAKE_DIR }}
+        
+        # SDK ka path CMake ko do
         cmake -S . -B build \
           -DCMAKE_TOOLCHAIN_FILE=$ANDROID_HOME/ndk/26.1.10909125/build/cmake/android.toolchain.cmake \
           -DANDROID_ABI=arm64-v8a \
-          -DANDROID_PLATFORM=android-24
+          -DANDROID_PLATFORM=android-24 \
+          -DCMAKE_CXX_FLAGS="-I$(pwd)/../../preloader_sdk/include"
+          
         cmake --build build -j$(nproc)
 
     - name: Upload Build Artifact
