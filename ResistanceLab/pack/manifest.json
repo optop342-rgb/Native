@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "id": "resistance-lab",
+  "name": "Resistance Lab",
+  "version": "1.0.0",
+  "author": "TumharaNaam",
+  "description": "Speed multiplier + ice-slide friction control (singleplayer)",
+  "type": "native",
+  "modules": [
+    {
+      "type": "native",
+      "abi": "arm64-v8a",
+      "path": "native/arm64-v8a/libresistance_lab.so"
+    }
+  ]
+}

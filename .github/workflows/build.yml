@@ -15,19 +15,9 @@ jobs:
 
     - name: Download and Setup Preloader SDK
       run: |
-        git clone https://github.com/LiteLDev/preloader-android.git preloader_sdk
-        
-    - name: Unzip and Find CMakeLists
-      run: |
-        if [ -f "ResistanceLab.zip" ]; then
-          unzip -q ResistanceLab.zip -d ResistanceLab_Build
-        else
-          echo "Error: ResistanceLab.zip not found!"
-          exit 1
-        fi
-        
-        CMAKE_DIR=$(find ResistanceLab_Build -name "CMakeLists.txt" -exec dirname {} \; | head -n 1)
-        echo "CMAKE_DIR=$CMAKE_DIR" >> $GITHUB_ENV
+        git clone --no-checkout https://github.com/LiteLDev/preloader-android.git preloader_sdk
+        git -C preloader_sdk fetch --depth 1 origin 5d108da350ce3e7f13f51415f81e65344ecd5d14
+        git -C preloader_sdk checkout --detach FETCH_HEAD
 
     - name: Setup Java
       uses: actions/setup-java@v4
@@ -41,32 +31,21 @@ jobs:
         cmdline-tools-version: 11076708
         packages: 'ndk;26.1.10909125 cmake;3.22.1'
 
-    - name: Patch CMakeLists for fmt and SDK
-      run: |
-        cd ${{ env.CMAKE_DIR }}
-        
-        # 1. File ke shuru mein FetchContent aur SDK include add karo
-        sed -i '1i include(FetchContent)\nFetchContent_Declare(fmt URL https://github.com/fmtlib/fmt/archive/refs/tags/10.2.1.zip)\nFetchContent_MakeAvailable(fmt)\ninclude_directories(${CMAKE_CURRENT_SOURCE_DIR}/../../preloader_sdk/include)' CMakeLists.txt
-        
-        # 2. Target ke saath fmt ko sahi jagah link karo (PUBLIC/PRIVATE ke baad)
-        # Ye line "PUBLIC" ya "PRIVATE" word ko dhoondh kar uske baad 'fmt' add karegi.
-        sed -i 's/target_link_libraries(resistance_lab \(PUBLIC\|PRIVATE\)/target_link_libraries(resistance_lab \1 fmt/g' CMakeLists.txt
-        
-        # Print final CMakeLists to verify
-        cat CMakeLists.txt
-
     - name: Build with CMake
       run: |
-        cd ${{ env.CMAKE_DIR }}
-        cmake -S . -B build \
+        cmake -S ResistanceLab -B ResistanceLab/build \
+          -DPRELOADER_SDK_ROOT="$GITHUB_WORKSPACE/preloader_sdk" \
           -DCMAKE_TOOLCHAIN_FILE=$ANDROID_HOME/ndk/26.1.10909125/build/cmake/android.toolchain.cmake \
           -DANDROID_ABI=arm64-v8a \
-          -DANDROID_PLATFORM=android-24
-        cmake --build build -j$(nproc)
+          -DANDROID_PLATFORM=android-24 \
+          -DANDROID_ALLOW_UNDEFINED_SYMBOLS=ON \
+          -DANDROID_STL=c++_static \
+          -DCMAKE_BUILD_TYPE=Release
+        cmake --build ResistanceLab/build -j$(nproc)
 
     - name: Upload Build Artifact
       uses: actions/upload-artifact@v4
       with:
         name: ResistanceLab-Build
-        path: ${{ env.CMAKE_DIR }}/build/**/*.so
+        path: ResistanceLab/build/libresistance_lab.so
         if-no-files-found: error
