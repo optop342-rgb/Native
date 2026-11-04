@@ -1,0 +1,128 @@
+Minecraft Bedrock libminecraftpe.so - Ghidra Analysis Notes
+===========================================================
+
+Scope
+-----
+Target: ../libs/libminecraftpe.so
+Architecture: ELF64, little-endian AArch64 shared library
+Build ID: 56de9eed077631e03a31f4f58eb2f0e00071d335
+File size: 328,419,680 bytes (313.21 MiB)
+Analysis style: targeted/scripted Ghidra analysis with auto-analysis disabled
+
+The binary is stripped of useful internal renderer names. RenderDragon is linked
+into libminecraftpe.so; it is not a separate library in this sample. Consequently,
+whole-library section and symbol counts are not RenderDragon-only measurements.
+
+Ghidra script
+-------------
+RenderPipelineInventory.java is the companion Ghidra Java script in this folder.
+It inventories renderer-related strings and symbols, scans AArch64 references to
+GLES imports, and can request decompilation at supplied addresses. Function-start
+guesses made by scanning instruction prologues are heuristic and require manual
+validation.
+
+Whole-library measurements
+--------------------------
+* .text: 196.29 MiB, ELF virtual-address range 0x064c64e0-0x129114ab
+* .rodata: 19.49 MiB
+* .eh_frame: 31.60 MiB
+* .data.rel.ro: 8.66 MiB
+* .bss: 2.75 MiB
+* Defined dynamic FUNC symbols: 79,315 across the entire library, not just
+  RenderDragon. Internal function boundaries/names are not comprehensively
+  recoverable from that count.
+
+Graphics API evidence
+---------------------
+Dynamic dependencies include libGLESv2.so and libEGL.so. The undefined dynamic
+imports include 82 unique GLES functions and 16 unique EGL functions (98 total).
+The GLES API set covers shader/program compilation and linking, textures,
+buffers, framebuffers, uniforms, draw calls, and GPU state. EGL imports cover
+display/context/surface setup, make-current, and buffer swapping.
+
+No libvulkan.so dependency or vk* undefined imports were found. Strings mentioning
+Vulkan exist, but they do not establish that a Vulkan backend is active or even
+present in this build.
+
+RenderDragon / BGFX map from strings and type metadata
+-----------------------------------------------------
+Evidence supports this high-level path:
+
+  EGL / BGFX context
+    -> frame start
+    -> frame descriptions collected by frame builder
+    -> BGFX frame graph generation/encoding
+    -> renderer modules/resources
+    -> GLES submission and EGL buffer swap
+
+Observed markers and relevant strings include:
+* Rendering_BgfxInit; Rendering_BgfxStartFrame
+* BgfxContext; BgfxFrameBuilder
+* "BgfxContext - Generate and encode frame graph"
+* BgfxFrameBuilder::endFrame and _insert methods for EffectDescription,
+  ItemDescription, LightDescription, SkyDescription, and UIDescription
+* texture streaming/cache task names and ShaderCache
+* frame/resource types including Atmosphere, SceneSky, CloudObject,
+  DeferredWater, ActorShadow, VolumetricFog, VoxelVolumeBuffers, UI, and
+  screenshot/capture resources
+* resource labels for deferred, ray-tracing, screenshot, curve, and missing
+  textures
+* volumetric fog and atmospheric scattering settings/metadata, including quality
+  levels and density/media/Henyey-Greenstein parameter names
+
+These are strings, type/schema names, and frame-graph markers. They show that the
+binary contains related code/data paths, but do not by themselves prove that a
+feature runs on every device or reveal the full rendering algorithm.
+
+Selected Ghidra addresses and candidates
+----------------------------------------
+Addresses below are Ghidra-loaded addresses from the earlier project, whose image
+base was 0x00100000. They are not raw file offsets or guaranteed runtime addresses.
+
+* 0x114dbbfc: shader-handling candidate decompiled in the earlier pass. It appears
+  to create/compile shaders and inspect compile status/logs. Observed call sites:
+  glCreateShader at 0x114dbeec; glShaderSource at 0x114dd504;
+  glCompileShader at 0x114dd50c; glGetShaderiv at 0x114dd520;
+  glGetShaderInfoLog at 0x114dd5b8. It recognizes shader enums 0x8B31 (vertex),
+  0x8B30 (fragment), and 0x91B9 (compute).
+* 0x114e3db4: program-link candidate; glLinkProgram was observed at 0x114e3f28,
+  with program status queries at 0x114e3f38 and 0x114e3f84.
+* 0x114de184: another graphics-operation candidate with framebuffer, program,
+  and uniform operations.
+
+These are selected candidate functions, not a complete list of renderer methods.
+Because the ELF is stripped and the earlier scan used guessed function starts,
+confirm each boundary and caller/callee relationship before treating a candidate
+as definitive.
+
+String locations previously noted
+---------------------------------
+The following are file offsets from a strings scan, not Ghidra virtual addresses:
+
+* 0x2326e2e: Rendering_BgfxStartFrame
+* 0x237fd59: source-path string for RenderDragon BgfxContext.cpp
+* 0x2393f6d: FrameBuilder::insert(RenderVolumetricFogDescription) signature
+* 0x24ce975: source-path string for BgfxFrameBuilder.cpp
+* 0x25182c7: BgfxContext::endFrame signature
+* 0x2526f40: BgfxFrameBuilder
+* 0x260efe0: "BgfxContext - Generate and encode frame graph"
+* 0x2636d14: Rendering_BgfxInit
+* 0x27936e4: OpenGLES context creation error string
+
+Prior GLES scan
+---------------
+The targeted scanner reported 82 GLES PLT entries and 425 direct .text call sites
+to those PLT stubs. The scanner's caller-start guesses were based on common
+AArch64 prologues and should not be read as a verified function census.
+
+Not completed / not established
+-------------------------------
+* No isolated RenderDragon byte-size, complete method count, or exhaustive
+  function/address map was established.
+* No reliable decompilation of the volumetric-fog shader/rendering algorithm was
+  established; fog configuration/schema strings are not that algorithm.
+* No Vulkan backend was confirmed.
+* The earlier work did not identify or validate a game slash-command executor,
+  nor the local player's live position/rotation access path. No supported runtime
+  bridge was implemented.
+
