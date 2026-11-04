@@ -1,0 +1,532 @@
+# Ghidra headless script: locate POV metadata references and decompile callers.
+import re
+import struct
+import jarray
+
+POV = re.compile(
+    r"(?i)(Camera(FirstPerson|ThirdPerson|PerspectiveOption|RenderFirstPersonObjects|"
+    r"FirstPersonClimbing|ThirdPersonBoom|ThirdPersonFixedBoom|SpecialCameraMode)|"
+    r"minecraft:camera_(first_person|third_person)|minecraft:(first_person|third_person|"
+    r"third_person_front)|playerViewPerspective|key\.togglePerspective|"
+    r"button\.toggle_perspective|options\.thirdperson|commands\.camera\.perspective|"
+    r"camera_third_person_boom|camera_first_person|firstperson_radio|thirdperson_radio|"
+    r"variable\.is_first_person|query\.is_first_person|"
+    r"FirstPersonPlayerShadowsEnabled|THIRD_PERSON)"
+)
+
+
+def scan_strings():
+    found = {}
+    memory = currentProgram.getMemory()
+    for block in memory.getBlocks():
+        if block.isExecute() or not block.isInitialized():
+            continue
+        offset = 0
+        while offset < block.getSize():
+            monitor.checkCancelled()
+            length = min(1 << 20, block.getSize() - offset)
+            buf = jarray.zeros(length, "b")
+            memory.getBytes(block.getStart().add(offset), buf, 0, length)
+            raw = "".join(chr(b & 0xff) for b in buf)
+            for match in re.finditer(r"[\x20-\x7e]{5,1024}", raw):
+                value = match.group(0)
+                if POV.search(value):
+                    address = block.getStart().getOffset() + offset + match.start()
+                    found[address] = value
+            offset += length
+    for address, value in sorted(found.items()):
+        println("POV_STRING\t%s\t%s" % (
+            currentProgram.getAddressFactory().getDefaultAddressSpace().getAddress(address),
+            value))
+    println("POV strings found: %d" % len(found))
+    return found
+
+
+def scan_references(strings):
+    pages = set(address & ~0xfff for address in strings)
+    references = {}
+    memory = currentProgram.getMemory()
+    for block in memory.getBlocks():
+        if not block.isExecute() or not block.isInitialized():
+            continue
+        offset = 0
+        while offset + 16 <= block.getSize():
+            monitor.checkCancelled()
+            length = min(1 << 20, block.getSize() - offset)
+            length &= ~3
+            buf = jarray.zeros(length, "b")
+            memory.getBytes(block.getStart().add(offset), buf, 0, length)
+            raw = "".join(chr(b & 0xff) for b in buf)
+            for i in range(0, length - 12, 4):
+                adrp = struct.unpack_from("<I", raw, i)[0]
+                if adrp & 0x9f000000 != 0x90000000:
+                    continue
+                immediate = (((adrp >> 5) & 0x7ffff) << 2) | ((adrp >> 29) & 3)
+                if immediate & (1 << 20):
+                    immediate |= ~((1 << 21) - 1)
+                pc = block.getStart().getOffset() + offset + i
+                page = (pc & ~0xfff) + (immediate << 12)
+                if page not in pages:
+                    continue
+                base_register = adrp & 0x1f
+                for step in range(1, 4):
+                    add = struct.unpack_from("<I", raw, i + step * 4)[0]
+                    if add & 0x7f000000 != 0x11000000 or ((add >> 5) & 0x1f) != base_register:
+                        continue
+                    addend = (add >> 10) & 0xfff
+                    if (add >> 22) & 1:
+                        addend <<= 12
+                    target = page + addend
+                    if target not in strings:
+                        continue
+                    reference = pc + step * 4
+                    references[reference] = strings[target]
+                    println("POV_XREF\t0x%x\t%s" % (reference, strings[target]))
+                    break
+            offset += length
+    println("Direct code references found: %d" % len(references))
+    return references
+
+
+def prologue_before(address):
+    memory = currentProgram.getMemory()
+    block = memory.getBlock(address)
+    if block is None:
+        return None
+    offset = address.subtract(block.getStart())
+    floor = max(0, offset - 0x4000)
+    pos = offset & ~3
+    while pos >= floor:
+        ins = memory.getInt(block.getStart().add(pos)) & 0xffffffff
+        masked = ins & 0xffc07fff
+        if masked in (0xa9807bfd, 0xa9007bfd) or ins & 0xffc003ff == 0xd10003ff:
+            return block.getStart().add(pos)
+        pos -= 4
+    return None
+
+
+def decompile_callers(references):
+    manager = currentProgram.getFunctionManager()
+    candidates = {}
+    for offset, label in references.items():
+        address = currentProgram.getAddressFactory().getDefaultAddressSpace().getAddress(offset)
+        function = manager.getFunctionContaining(address)
+        if function is not None:
+            candidates[function.getEntryPoint().getOffset()] = label
+        else:
+            start = prologue_before(address)
+            if start is not None:
+                candidates[start.getOffset()] = label
+
+    decompiler = ghidra.app.decompiler.DecompInterface()
+    decompiler.openProgram(currentProgram)
+    completed = 0
+    try:
+        for offset, label in sorted(candidates.items()):
+            if completed >= 24:
+                break
+            address = currentProgram.getAddressFactory().getDefaultAddressSpace().getAddress(offset)
+            function = manager.getFunctionAt(address)
+            if function is None:
+                disassemble(address)
+                function = createFunction(address, "POV_candidate_%x" % offset)
+            if function is None:
+                println("DECOMPILE_FAILED\t%s\tno function" % address)
+                continue
+            result = decompiler.decompileFunction(function, 45, monitor)
+            if not result.decompileCompleted() or result.getDecompiledFunction() is None:
+                println("DECOMPILE_FAILED\t%s\t%s" % (address, result.getErrorMessage()))
+                continue
+            code = result.getDecompiledFunction().getC()
+            println("POV_DECOMPILE\t%s\t%s\n%s" % (address, label, code[:18000]))
+            completed += 1
+    finally:
+        decompiler.dispose()
+    println("Candidate functions decompiled: %d" % completed)
+
+
+def trace_string_references(address_strings):
+    manager = currentProgram.getFunctionManager()
+    references = currentProgram.getReferenceManager()
+    candidates = {}
+    for address_string in address_strings:
+        address = currentProgram.getAddressFactory().getDefaultAddressSpace().getAddress(
+            int(address_string, 0))
+        iterator = references.getReferencesTo(address)
+        count = 0
+        while iterator.hasNext():
+            reference = iterator.next()
+            caller = manager.getFunctionContaining(reference.getFromAddress())
+            println("POV_STRING_XREF\t%s\t%s\t%s" % (
+                address, reference.getFromAddress(),
+                caller.getEntryPoint() if caller is not None else "<no-function>"))
+            if caller is not None:
+                candidates[caller.getEntryPoint().getOffset()] = address_string
+            count += 1
+        if count == 0:
+            println("POV_STRING_NO_XREF\t%s" % address)
+    decompile_callers(candidates)
+
+
+script_args = getScriptArgs()
+if script_args:
+    if script_args[0].startswith("s:"):
+        trace_string_references([arg[2:] for arg in script_args])
+    else:
+        references = {}
+        for arg in script_args:
+            references[int(arg, 0)] = "manual reference"
+        decompile_callers(references)
+else:
+    strings = scan_strings()
+    references = scan_references(strings)
+    decompile_callers(references)
+import ghidra.app.decompiler.DecompInterface;
+import ghidra.app.decompiler.DecompileResults;
+import ghidra.app.script.GhidraScript;
+import ghidra.program.model.listing.Function;
+import ghidra.program.model.mem.MemoryBlock;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.Set;
+import java.util.regex.Pattern;
+
+public class PlayerPerspectiveTrace extends GhidraScript {
+    private static final Pattern POV = Pattern.compile(
+        "(?i)(Camera(FirstPerson|ThirdPerson|PerspectiveOption|RenderFirstPersonObjects|" +
+        "FirstPersonClimbing|ThirdPersonBoom|ThirdPersonFixedBoom|SpecialCameraMode)" +
+        "|minecraft:camera_(first_person|third_person)|minecraft:(first_person|" +
+        "third_person|third_person_front)|playerViewPerspective|key\\.togglePerspective|" +
+        "button\\.toggle_perspective|options\\.thirdperson|commands\\.camera\\.perspective|" +
+        "camera_third_person_boom|camera_first_person|firstperson_radio|thirdperson_radio|" +
+        "variable\\.is_first_person|query\\.is_first_person|FirstPersonPlayerShadowsEnabled|" +
+        "THIRD_PERSON)");
+
+    @Override
+    public void run() throws Exception {
+        Map<Long, String> strings = findStrings();
+        println("POV strings found: " + strings.size());
+        Map<Long, String> references = findCodeReferences(strings);
+        println("Direct code references found: " + references.size());
+        decompileReferences(references);
+    }
+
+    private Map<Long, String> findStrings() throws Exception {
+        Map<Long, String> found = new LinkedHashMap<>();
+        for (MemoryBlock block : currentProgram.getMemory().getBlocks()) {
+            if (block.isExecute() || !block.isInitialized()) {
+                continue;
+            }
+            StringBuilder value = new StringBuilder();
+            long start = block.getStart().getOffset();
+            for (long offset = 0; offset < block.getSize(); offset++) {
+                if ((offset & 0xfffff) == 0) {
+                    monitor.checkCancelled();
+                }
+                int b = currentProgram.getMemory().getByte(block.getStart().add(offset)) & 0xff;
+                if (b >= 0x20 && b <= 0x7e) {
+                    if (value.length() < 1024) {
+                        value.append((char) b);
+                    }
+                }
+                else {
+                    addString(found, start + offset - value.length(), value);
+                    value.setLength(0);
+                }
+            }
+        }
+        for (Map.Entry<Long, String> entry : found.entrySet()) {
+            println("POV_STRING\t" + currentProgram.getAddressFactory()
+                .getDefaultAddressSpace().getAddress(entry.getKey()) + "\t" + entry.getValue());
+        }
+        return found;
+    }
+
+    private void addString(Map<Long, String> found, long address, StringBuilder value) {
+        if (value.length() >= 5 && POV.matcher(value).find()) {
+            found.putIfAbsent(address, value.toString());
+        }
+    }
+
+    private Map<Long, String> findCodeReferences(Map<Long, String> strings) throws Exception {
+        Set<Long> targetPages = new HashSet<>();
+        Map<Long, String> pageLabels = new HashMap<>();
+        for (Map.Entry<Long, String> entry : strings.entrySet()) {
+            long page = entry.getKey() & ~0xfffL;
+            targetPages.add(page);
+            pageLabels.putIfAbsent(page, entry.getValue());
+        }
+
+        Map<Long, String> references = new LinkedHashMap<>();
+        byte[] bytes = new byte[1 << 20];
+        for (MemoryBlock block : currentProgram.getMemory().getBlocks()) {
+            if (!block.isExecute() || !block.isInitialized()) {
+                continue;
+            }
+            long offset = 0;
+            while (offset + 16 <= block.getSize()) {
+                monitor.checkCancelled();
+                int length = (int) Math.min(bytes.length, block.getSize() - offset);
+                length &= ~3;
+                currentProgram.getMemory().getBytes(block.getStart().add(offset), bytes, 0, length);
+                for (int i = 0; i + 12 < length; i += 4) {
+                    long adrp = word(bytes, i);
+                    if ((adrp & 0x9f000000L) != 0x90000000L) {
+                        continue;
+                    }
+                    long imm = (((adrp >>> 5) & 0x7ffffL) << 2) |
+                        ((adrp >>> 29) & 3L);
+                    if ((imm & (1L << 20)) != 0) {
+                        imm |= ~((1L << 21) - 1);
+                    }
+                    long pc = block.getStart().getOffset() + offset + i;
+                    long page = (pc & ~0xfffL) + (imm << 12);
+                    if (!targetPages.contains(page)) {
+                        continue;
+                    }
+
+                    int base = (int) (adrp & 0x1f);
+                    for (int step = 1; step <= 3 && i + step * 4 < length; step++) {
+                        long add = word(bytes, i + step * 4);
+                        if ((add & 0x7f000000L) != 0x11000000L ||
+                                ((add >>> 5) & 0x1f) != base) {
+                            continue;
+                        }
+                        long addend = (add >>> 10) & 0xfffL;
+                        if (((add >>> 22) & 1) != 0) {
+                            addend <<= 12;
+                        }
+                        long target = page + addend;
+                        String value = strings.get(target);
+                        if (value == null) {
+                            continue;
+                        }
+                        long ref = pc + step * 4;
+                        references.putIfAbsent(ref, value);
+                        println("POV_XREF\t0x" + Long.toHexString(ref) + "\t" + value);
+                        break;
+                    }
+                }
+                offset += length;
+            }
+        }
+        return references;
+    }
+
+    private void decompileReferences(Map<Long, String> references) throws Exception {
+        Map<Long, String> candidates = new LinkedHashMap<>();
+        for (Map.Entry<Long, String> entry : references.entrySet()) {
+            var refAddress = currentProgram.getAddressFactory()
+                .getDefaultAddressSpace().getAddress(entry.getKey());
+            Function containing =
+                currentProgram.getFunctionManager().getFunctionContaining(refAddress);
+            if (containing != null) {
+                candidates.putIfAbsent(containing.getEntryPoint().getOffset(), entry.getValue());
+                continue;
+            }
+            var start = findPrologue(refAddress);
+            if (start != null) {
+                candidates.putIfAbsent(start.getOffset(), entry.getValue());
+            }
+        }
+
+        DecompInterface decompiler = new DecompInterface();
+        decompiler.openProgram(currentProgram);
+        int count = 0;
+        try {
+            for (Map.Entry<Long, String> entry : candidates.entrySet()) {
+                if (count >= 16) {
+                    break;
+                }
+                var address = currentProgram.getAddressFactory()
+                    .getDefaultAddressSpace().getAddress(entry.getKey());
+                Function function = currentProgram.getFunctionManager().getFunctionAt(address);
+                if (function == null) {
+                    disassemble(address);
+                    function = createFunction(address, "POV_candidate_" +
+                        Long.toHexString(entry.getKey()));
+                }
+                if (function == null) {
+                    println("DECOMPILE_FAILED\t" + address + "\t" + entry.getValue());
+                    continue;
+                }
+                DecompileResults result = decompiler.decompileFunction(function, 45, monitor);
+                if (!result.decompileCompleted() || result.getDecompiledFunction() == null) {
+                    println("DECOMPILE_FAILED\t" + address + "\t" + result.getErrorMessage());
+                    continue;
+                }
+                String code = result.getDecompiledFunction().getC();
+                println("POV_DECOMPILE\t" + address + "\t" + entry.getValue() + "\n" +
+                    code.substring(0, Math.min(code.length(), 18000)));
+                count++;
+            }
+        }
+        finally {
+            decompiler.dispose();
+        }
+        println("Candidate functions decompiled: " + count);
+    }
+
+    private ghidra.program.model.address.Address findPrologue(
+            ghidra.program.model.address.Address reference) throws Exception {
+        MemoryBlock block = currentProgram.getMemory().getBlock(reference);
+        if (block == null) {
+            return null;
+        }
+        long offset = reference.subtract(block.getStart());
+        long min = Math.max(0, offset - 0x4000);
+        for (long pos = offset & ~3L; pos >= min; pos -= 4) {
+            long ins = currentProgram.getMemory().getInt(block.getStart().add(pos)) & 0xffffffffL;
+            long masked = ins & 0xffc07fffL;
+            if (masked == 0xa9807bfdL || masked == 0xa9007bfdL ||
+                    (ins & 0xffc003ffL) == 0xd10003ffL) {
+                return block.getStart().add(pos);
+            }
+        }
+        return null;
+    }
+
+    private long word(byte[] bytes, int offset) {
+        return (bytes[offset] & 0xffL) |
+            ((bytes[offset + 1] & 0xffL) << 8) |
+            ((bytes[offset + 2] & 0xffL) << 16) |
+            ((bytes[offset + 3] & 0xffL) << 24);
+    }
+}
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+static uint32_t read32(const unsigned char *p) {
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+        ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static int is_prologue(uint32_t ins) {
+    uint32_t masked = ins & 0xffc07fffU;
+    return masked == 0xa9807bfdU || masked == 0xa9007bfdU ||
+        (ins & 0xffc003ffU) == 0xd10003ffU;
+}
+
+int main(int argc, char **argv) {
+    const uint64_t text_file_offset = 0x64c64e0;
+    const uint64_t text_address = 0x64c64e0;
+    const uint64_t text_size = 0xc44afcc;
+    if (argc < 3) {
+        fprintf(stderr, "usage: %s libminecraftpe.so target-address ...\n", argv[0]);
+        return 2;
+    }
+
+    uint64_t targets[128];
+    int target_count = argc - 2;
+    if (target_count > 128) {
+        fprintf(stderr, "too many targets\n");
+        return 2;
+    }
+    for (int i = 0; i < target_count; i++) {
+        targets[i] = strtoull(argv[i + 2], NULL, 0) - 0x100000;
+    }
+
+    FILE *file = fopen(argv[1], "rb");
+    if (!file) {
+        perror(argv[1]);
+        return 1;
+    }
+    if (fseek(file, (long)text_file_offset, SEEK_SET) != 0) {
+        perror("fseek");
+        fclose(file);
+        return 1;
+    }
+    unsigned char *text = malloc((size_t)text_size);
+    if (!text || fread(text, 1, (size_t)text_size, file) != text_size) {
+        fprintf(stderr, "failed to read .text section\n");
+        free(text);
+        fclose(file);
+        return 1;
+    }
+    fclose(file);
+
+    unsigned long hits = 0;
+    unsigned long page_hits = 0;
+    for (uint64_t offset = 0; offset + 16 <= text_size; offset += 4) {
+        uint32_t adrp = read32(text + offset);
+        if ((adrp & 0x9f000000U) != 0x90000000U) {
+            continue;
+        }
+        int64_t immediate = (int64_t)((((adrp >> 5) & 0x7ffffU) << 2) |
+            ((adrp >> 29) & 3U));
+        if (immediate & (1 << 20)) {
+            immediate |= ~((1 << 21) - 1);
+        }
+        uint64_t pc = text_address + offset;
+        uint64_t page = (pc & ~0xfffULL) + (immediate << 12);
+        uint32_t base_register = adrp & 0x1fU;
+
+        int page_match = 0;
+        for (int t = 0; t < target_count; t++) {
+            if (page == (targets[t] & ~0xfffULL)) {
+                page_match = 1;
+                break;
+            }
+        }
+        if (page_match && page_hits < 300) {
+            uint32_t next[3] = {0, 0, 0};
+            uint64_t resolved[3] = {0, 0, 0};
+            for (int step = 1; step <= 3; step++) {
+                next[step - 1] = read32(text + offset + step * 4);
+                uint32_t ins = next[step - 1];
+                if ((ins & 0x7f000000U) == 0x11000000U &&
+                        ((ins >> 5) & 0x1fU) == base_register) {
+                    resolved[step - 1] = page + (((ins >> 10) & 0xfffU) <<
+                        (((ins >> 22) & 1U) ? 12 : 0));
+                }
+            }
+            printf("adrp=0x%llx page=0x%llx next=%08x,%08x,%08x targets=0x%llx,0x%llx,0x%llx\n",
+                (unsigned long long)(pc + 0x100000),
+                (unsigned long long)(page + 0x100000),
+                next[0], next[1], next[2],
+                (unsigned long long)(resolved[0] ? resolved[0] + 0x100000 : 0),
+                (unsigned long long)(resolved[1] ? resolved[1] + 0x100000 : 0),
+                (unsigned long long)(resolved[2] ? resolved[2] + 0x100000 : 0));
+            page_hits++;
+        }
+
+        for (int step = 1; step <= 3; step++) {
+            uint32_t add = read32(text + offset + step * 4);
+            if ((add & 0x7f000000U) != 0x11000000U ||
+                    ((add >> 5) & 0x1fU) != base_register) {
+                continue;
+            }
+            uint64_t target = page + (((add >> 10) & 0xfffU) <<
+                (((add >> 22) & 1U) ? 12 : 0));
+            for (int t = 0; t < target_count; t++) {
+                if (target != targets[t]) {
+                    continue;
+                }
+                uint64_t floor = offset > 0x4000 ? offset - 0x4000 : 0;
+                uint64_t start = offset & ~3ULL;
+                while (start >= floor) {
+                    if (is_prologue(read32(text + start))) {
+                        break;
+                    }
+                    if (start < 4) {
+                        break;
+                    }
+                    start -= 4;
+                }
+                printf("xref=0x%llx target=0x%llx start_guess=0x%llx\n",
+                    (unsigned long long)(pc + step * 4 + 0x100000),
+                    (unsigned long long)(target + 0x100000),
+                    (unsigned long long)(text_address + start + 0x100000));
+                hits++;
+                break;
+            }
+            break;
+        }
+    }
+    printf("references=%lu page_references=%lu\n", hits, page_hits);
+    free(text);
+    return 0;
+}
