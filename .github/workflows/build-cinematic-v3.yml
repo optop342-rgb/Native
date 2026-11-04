@@ -1,0 +1,55 @@
+name: build-cinematic-v3
+
+on:
+  push:
+    paths:
+      - 'v3_cine_mod_project.zip'
+      - '.github/workflows/build-cinematic-v3.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Android SDK and NDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: ndk;26.1.10909125 cmake;3.22.1
+
+      - name: Check out Preloader SDK
+        run: |
+          git clone --no-checkout https://github.com/LiteLDev/preloader-android.git preloader_sdk
+          git -C preloader_sdk fetch --depth 1 origin 5d108da350ce3e7f13f51415f81e65344ecd5d14
+          git -C preloader_sdk checkout --detach FETCH_HEAD
+
+      - name: Extract V3 cinematic mod project
+        run: unzip -q v3_cine_mod_project.zip -d work
+
+      - name: Build V3 arm64-v8a package
+        working-directory: work/v3
+        env:
+          ANDROID_PLATFORM: android-26
+          PRELOADER_SDK_DIR: ${{ github.workspace }}/preloader_sdk
+        run: ANDROID_NDK_HOME="$ANDROID_HOME/ndk/26.1.10909125" bash build.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cinematic-mod-v3
+          path: work/v3/dist/
+          if-no-files-found: error
+
+  host-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract V3 cinematic mod project
+        run: unzip -q v3_cine_mod_project.zip -d work
+
+      - name: Run V3 host tests
+        run: make -C work/v3/tests run
